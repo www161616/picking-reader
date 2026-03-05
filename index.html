@@ -456,7 +456,20 @@ function handleFile(input) {
   } else if (ext === 'csv' || ext === 'xlsx' || ext === 'xls') {
     const reader = new FileReader();
     reader.onload = (e) => {
-      const wb = XLSX.read(e.target.result, { type: 'array' });
+      const data = new Uint8Array(e.target.result);
+      let wb;
+      if (ext === 'csv') {
+        // CSV 先試 UTF-8，如果出現亂碼再試 Big5 (codepage 950)
+        wb = XLSX.read(data, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const testCell = XLSX.utils.sheet_to_csv(ws).substring(0, 200);
+        if (/[�ÿ]|[\ufffd]/.test(testCell) || !/[\u4e00-\u9fff]/.test(testCell)) {
+          // 可能是 Big5 編碼，重新讀取
+          wb = XLSX.read(data, { type: 'array', codepage: 950 });
+        }
+      } else {
+        wb = XLSX.read(data, { type: 'array' });
+      }
       const ws = wb.Sheets[wb.SheetNames[0]];
       handleSheet(ws);
       document.getElementById('parseStatus').textContent = `已載入 ${file.name}`;
