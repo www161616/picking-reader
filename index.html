@@ -472,27 +472,123 @@ function handleFile(input) {
   input.value = '';
 }
 
+function parseCSVLine(line) {
+  // 處理含有引號的 CSV 欄位（欄位內可能有換行、逗號）
+  const cols = [];
+  let current = '';
+  let inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuote) {
+      if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
+      else if (ch === '"') { inQuote = false; }
+      else { current += ch; }
+    } else {
+      if (ch === '"') { inQuote = true; }
+      else if (ch === ',') { cols.push(current); current = ''; }
+      else { current += ch; }
+    }
+  }
+  cols.push(current);
+  return cols;
+}
+
 function handleCSV(csvText) {
-  const lines = csvText.split('\n').filter(l => l.trim());
+  // 先把引號內的換行合併回同一行
+  const rawLines = [];
+  let buffer = '';
+  let quoteCount = 0;
+  for (const line of csvText.split('\n')) {
+    buffer += (buffer ? '\n' : '') + line;
+    quoteCount += (line.match(/"/g) || []).length;
+    if (quoteCount % 2 === 0) {
+      rawLines.push(buffer);
+      buffer = '';
+      quoteCount = 0;
+    }
+  }
+  if (buffer) rawLines.push(buffer);
+
+  const lines = rawLines.filter(l => l.trim());
   if (lines.length < 2) {
     document.getElementById('parseStatus').textContent = '檔案內容不足';
     return;
   }
 
-  // 嘗試判斷格式
-  const firstLine = lines[0].split(',');
+  // 偵測撿貨表格式：找含有「商品名稱」的標題列
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(5, lines.length); i++) {
+    if (lines[i].includes('商品名稱')) { headerIdx = i; break; }
+  }
 
-  // 格式A：表格式 — 第一列是標題列（商品/店1/店2/...），後續列是數量
-  // 格式B：文字式 — 每行就是「商品名,店名數量,店名數量,...」
-  // 判斷：如果第一列第二欄以後都不含數字，視為表格標題列
-  const isTable = firstLine.length >= 2 && firstLine.slice(1).every(h => h.trim() && !/\d/.test(h.trim()));
+  if (headerIdx >= 0) {
+    // 撿貨表格式：找第二段「商品名稱」（撿貨後的數量）
+    const headerCols = parseCSVLine(lines[headerIdx]);
+
+    // 找所有「商品名稱」出現的位置，取第二個（撿貨後）
+    const nameColCandidates = [];
+    for (let c = 0; c < headerCols.length; c++) {
+      if (headerCols[c].replace(/\s+/g, '').trim() === '商品名稱') {
+        nameColCandidates.push(c);
+      }
+    }
+
+    // 用第二段（撿貨後），如果只有一段就用第一段
+    let nameCol = nameColCandidates.length >= 2 ? nameColCandidates[1] : nameColCandidates[0] || -1;
+    let totalCol = -1;
+    const storeStartCol = [];
+    const storeNames = [];
+    const skipHeaders = ['剩餘','訂貨','結單日','商品編號','商品名稱','總數','回'];
+
+    if (nameCol >= 0) {
+      // 從 nameCol 往後找「總數」
+      for (let c = nameCol + 1; c < headerCols.length; c++) {
+        if (headerCols[c].replace(/\s+/g, '').trim() === '總數') { totalCol = c; break; }
+      }
+      // 總數之後就是各店名
+      if (totalCol >= 0) {
+        for (let sc = totalCol + 1; sc < headerCols.length; sc++) {
+          const sh = headerCols[sc].replace(/\s+/g, '').trim();
+          if (!sh || skipHeaders.includes(sh)) break;
+          storeNames.push(sh);
+          storeStartCol.push(sc);
+        }
+      }
+    }
+
+    if (nameCol >= 0 && storeNames.length > 0) {
+      const result = [];
+      for (let i = headerIdx + 1; i < lines.length; i++) {
+        const cols = parseCSVLine(lines[i]);
+        const productName = (cols[nameCol] || '').trim();
+        if (!productName) continue;
+
+        const stores = [];
+        for (let j = 0; j < storeNames.length; j++) {
+          const qty = parseInt(cols[storeStartCol[j]]);
+          if (qty > 0) {
+            stores.push(`${storeNames[j]}${qty}`);
+          }
+        }
+        if (stores.length > 0) {
+          result.push(`${productName}，${stores.join('、')}`);
+        }
+      }
+      document.getElementById('inputText').value = result.join('\n');
+      parseInput();
+      return;
+    }
+  }
+
+  // 一般表格格式
+  const firstCols = parseCSVLine(lines[0]);
+  const isTable = firstCols.length >= 2 && firstCols.slice(1).some(h => h.trim()) && firstCols.slice(1).every(h => !h.trim() || !/\d/.test(h.trim()));
 
   if (isTable) {
-    // 表格格式：第一列是店名，後續列是商品+各店數量
-    const storeNames = firstLine.slice(1).map(s => s.trim());
+    const storeNames = firstCols.slice(1).map(s => s.trim());
     const result = [];
     for (let i = 1; i < lines.length; i++) {
-      const cols = lines[i].split(',');
+      const cols = parseCSVLine(lines[i]);
       const productName = cols[0].trim();
       if (!productName) continue;
       const stores = [];
@@ -508,7 +604,6 @@ function handleCSV(csvText) {
     }
     document.getElementById('inputText').value = result.join('\n');
   } else {
-    // 文字格式：直接當文字處理，把逗號換成頓號（除了第一個逗號）
     const result = lines.map(line => {
       const commaIdx = line.indexOf(',');
       if (commaIdx === -1) return line;
