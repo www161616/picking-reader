@@ -331,8 +331,8 @@ input[type="range"] { width: 100px; }
     <div class="section-title">撿貨清單</div>
     <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; align-items:center;">
       <label class="btn" style="background:#0d47a1; color:#fff; cursor:pointer; display:inline-flex; align-items:center; gap:6px;">
-        上傳檔案 (.txt / .csv / .xlsx)
-        <input type="file" id="fileInput" accept=".txt,.csv,.xlsx" style="display:none;" onchange="handleFile(this)">
+        上傳檔案 (.txt / .csv / .xlsx / .xls)
+        <input type="file" id="fileInput" accept=".txt,.csv,.xlsx,.xls" style="display:none;" onchange="handleFile(this)">
       </label>
       <span style="color:#666; font-size:0.85rem;">或直接在下方貼上文字</span>
     </div>
@@ -453,18 +453,12 @@ function handleFile(input) {
       document.getElementById('parseStatus').textContent = `已載入 ${file.name}`;
       parseInput();
     });
-  } else if (ext === 'csv') {
-    file.text().then(text => {
-      handleCSV(text);
-      document.getElementById('parseStatus').textContent = `已載入 ${file.name}`;
-    });
-  } else if (ext === 'xlsx') {
+  } else if (ext === 'csv' || ext === 'xlsx' || ext === 'xls') {
     const reader = new FileReader();
     reader.onload = (e) => {
       const wb = XLSX.read(e.target.result, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
-      const csv = XLSX.utils.sheet_to_csv(ws);
-      handleCSV(csv);
+      handleSheet(ws);
       document.getElementById('parseStatus').textContent = `已載入 ${file.name}`;
     };
     reader.readAsArrayBuffer(file);
@@ -472,100 +466,65 @@ function handleFile(input) {
   input.value = '';
 }
 
-function parseCSVLine(line) {
-  // 處理含有引號的 CSV 欄位（欄位內可能有換行、逗號）
-  const cols = [];
-  let current = '';
-  let inQuote = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuote) {
-      if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
-      else if (ch === '"') { inQuote = false; }
-      else { current += ch; }
-    } else {
-      if (ch === '"') { inQuote = true; }
-      else if (ch === ',') { cols.push(current); current = ''; }
-      else { current += ch; }
+function handleSheet(ws) {
+  // 用 SheetJS 直接讀取儲存格，避免 CSV 引號/換行問題
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+  const maxRow = range.e.r;
+  const maxCol = range.e.c;
+
+  function cellVal(r, c) {
+    const addr = XLSX.utils.encode_cell({ r, c });
+    const cell = ws[addr];
+    return cell ? String(cell.v || '').replace(/\s+/g, '').trim() : '';
+  }
+
+  // 找含有「商品名稱」的標題列
+  let headerRow = -1;
+  for (let r = 0; r <= Math.min(5, maxRow); r++) {
+    for (let c = 0; c <= maxCol; c++) {
+      if (cellVal(r, c) === '商品名稱') { headerRow = r; break; }
     }
-  }
-  cols.push(current);
-  return cols;
-}
-
-function handleCSV(csvText) {
-  // 先把引號內的換行合併回同一行
-  const rawLines = [];
-  let buffer = '';
-  let quoteCount = 0;
-  for (const line of csvText.split('\n')) {
-    buffer += (buffer ? '\n' : '') + line;
-    quoteCount += (line.match(/"/g) || []).length;
-    if (quoteCount % 2 === 0) {
-      rawLines.push(buffer);
-      buffer = '';
-      quoteCount = 0;
-    }
-  }
-  if (buffer) rawLines.push(buffer);
-
-  const lines = rawLines.filter(l => l.trim());
-  if (lines.length < 2) {
-    document.getElementById('parseStatus').textContent = '檔案內容不足';
-    return;
+    if (headerRow >= 0) break;
   }
 
-  // 偵測撿貨表格式：找含有「商品名稱」的標題列
-  let headerIdx = -1;
-  for (let i = 0; i < Math.min(5, lines.length); i++) {
-    if (lines[i].includes('商品名稱')) { headerIdx = i; break; }
-  }
-
-  if (headerIdx >= 0) {
-    // 撿貨表格式：找第二段「商品名稱」（撿貨後的數量）
-    const headerCols = parseCSVLine(lines[headerIdx]);
-
-    // 找所有「商品名稱」出現的位置，取第二個（撿貨後）
+  if (headerRow >= 0) {
+    // 找所有「商品名稱」欄位位置
     const nameColCandidates = [];
-    for (let c = 0; c < headerCols.length; c++) {
-      if (headerCols[c].replace(/\s+/g, '').trim() === '商品名稱') {
-        nameColCandidates.push(c);
-      }
+    for (let c = 0; c <= maxCol; c++) {
+      if (cellVal(headerRow, c) === '商品名稱') nameColCandidates.push(c);
     }
 
-    // 用第二段（撿貨後），如果只有一段就用第一段
-    let nameCol = nameColCandidates.length >= 2 ? nameColCandidates[1] : nameColCandidates[0] || -1;
+    // 取第二段（撿貨後），如果只有一段就用第一段
+    const nameCol = nameColCandidates.length >= 2 ? nameColCandidates[1] : nameColCandidates[0];
+
+    // 從 nameCol 往後找「總數」
     let totalCol = -1;
-    const storeStartCol = [];
-    const storeNames = [];
-    const skipHeaders = ['剩餘','訂貨','結單日','商品編號','商品名稱','總數','回'];
+    for (let c = nameCol + 1; c <= maxCol; c++) {
+      if (cellVal(headerRow, c) === '總數') { totalCol = c; break; }
+    }
 
-    if (nameCol >= 0) {
-      // 從 nameCol 往後找「總數」
-      for (let c = nameCol + 1; c < headerCols.length; c++) {
-        if (headerCols[c].replace(/\s+/g, '').trim() === '總數') { totalCol = c; break; }
-      }
-      // 總數之後就是各店名
-      if (totalCol >= 0) {
-        for (let sc = totalCol + 1; sc < headerCols.length; sc++) {
-          const sh = headerCols[sc].replace(/\s+/g, '').trim();
-          if (!sh || skipHeaders.includes(sh)) break;
-          storeNames.push(sh);
-          storeStartCol.push(sc);
-        }
+    // 總數之後就是各店名
+    const storeNames = [];
+    const storeCols = [];
+    const skipHeaders = ['剩餘','訂貨','結單日','商品編號','商品名稱','總數','回','出貨時間'];
+    if (totalCol >= 0) {
+      for (let c = totalCol + 1; c <= maxCol; c++) {
+        const h = cellVal(headerRow, c);
+        if (!h || skipHeaders.includes(h)) break;
+        storeNames.push(h);
+        storeCols.push(c);
       }
     }
 
-    if (nameCol >= 0 && storeNames.length > 0) {
+    if (storeNames.length > 0) {
       const result = [];
-      for (let i = headerIdx + 1; i < lines.length; i++) {
-        const cols = parseCSVLine(lines[i]);
-        const productName = (cols[nameCol] || '').trim();
+      for (let r = headerRow + 1; r <= maxRow; r++) {
+        const productName = cellVal(r, nameCol);
         if (!productName) continue;
-
         const stores = [];
         for (let j = 0; j < storeNames.length; j++) {
-          const qty = parseInt(cols[storeStartCol[j]]);
+          const v = cellVal(r, storeCols[j]);
+          const qty = parseInt(v);
           if (qty > 0) {
             stores.push(`${storeNames[j]}${qty}`);
           }
@@ -580,38 +539,31 @@ function handleCSV(csvText) {
     }
   }
 
-  // 一般表格格式
-  const firstCols = parseCSVLine(lines[0]);
-  const isTable = firstCols.length >= 2 && firstCols.slice(1).some(h => h.trim()) && firstCols.slice(1).every(h => !h.trim() || !/\d/.test(h.trim()));
+  // 一般表格格式：第一列當店名標題
+  const storeNames = [];
+  for (let c = 1; c <= maxCol; c++) {
+    const h = cellVal(0, c);
+    if (h && !/\d/.test(h)) storeNames.push({ name: h, col: c });
+    else break;
+  }
 
-  if (isTable) {
-    const storeNames = firstCols.slice(1).map(s => s.trim());
+  if (storeNames.length > 0) {
     const result = [];
-    for (let i = 1; i < lines.length; i++) {
-      const cols = parseCSVLine(lines[i]);
-      const productName = cols[0].trim();
+    for (let r = 1; r <= maxRow; r++) {
+      const productName = cellVal(r, 0);
       if (!productName) continue;
       const stores = [];
-      for (let j = 1; j < cols.length && j <= storeNames.length; j++) {
-        const qty = parseInt(cols[j]);
-        if (qty > 0) {
-          stores.push(`${storeNames[j - 1]}${qty}`);
-        }
+      for (const s of storeNames) {
+        const qty = parseInt(cellVal(r, s.col));
+        if (qty > 0) stores.push(`${s.name}${qty}`);
       }
-      if (stores.length > 0) {
-        result.push(`${productName}，${stores.join('、')}`);
-      }
+      if (stores.length > 0) result.push(`${productName}，${stores.join('、')}`);
     }
     document.getElementById('inputText').value = result.join('\n');
   } else {
-    const result = lines.map(line => {
-      const commaIdx = line.indexOf(',');
-      if (commaIdx === -1) return line;
-      const name = line.substring(0, commaIdx).trim();
-      const rest = line.substring(commaIdx + 1).trim().replace(/,/g, '、');
-      return `${name}，${rest}`;
-    });
-    document.getElementById('inputText').value = result.join('\n');
+    // 直接轉文字
+    const csv = XLSX.utils.sheet_to_csv(ws);
+    document.getElementById('inputText').value = csv;
   }
   parseInput();
 }
