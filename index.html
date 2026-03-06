@@ -262,6 +262,7 @@ input[type="range"] { width: 100px; }
   gap: 10px;
 }
 .preview-item:last-child { border-bottom: none; }
+.preview-item:hover { background: #1a3a6a; border-radius: 6px; }
 .preview-item.current {
   background: #1a3a6a;
   border-radius: 6px;
@@ -734,7 +735,7 @@ function renderPreview() {
   }
   container.innerHTML = parsedItems.map((item, i) => {
     const storesStr = item.stores.map(s => `${s.store}${s.qty}`).join('、');
-    return `<div class="preview-item${i === currentProductIdx && isPlaying ? ' current' : ''}" id="prev-${i}">
+    return `<div class="preview-item${i === currentProductIdx && isPlaying ? ' current' : ''}" id="prev-${i}" onclick="playFromProduct(${i})" style="cursor:pointer;" title="點擊從此商品開始播報">
       <span class="preview-name">${item.name}</span>
       <span class="preview-stores">${storesStr}</span>
     </div>`;
@@ -920,6 +921,14 @@ async function playFromCurrent() {
     updateButtons();
     renderPreview();
   }
+}
+
+function playFromProduct(idx) {
+  if (idx < 0 || idx >= parsedItems.length) return;
+  currentProductIdx = idx;
+  currentStoreIdx = 0;
+  startFromStore = -1;
+  restartPlay();
 }
 
 function togglePause() {
